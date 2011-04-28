@@ -1,0 +1,435 @@
+options { JDK_VERSION = "1.5"; STATIC = false; SUPPORT_CLASS_VISIBILITY_PUBLIC = false; }
+
+PARSER_BEGIN(DGSJJParser)
+package org.graphstream.stream.file;
+
+import org.graphstream.stream.SourceBase;
+import org.graphstream.stream.time.ISODateIO;
+import org.graphstream.stream.time.TimestampSourceTime;
+import org.graphstream.stream.time.TimeException;
+
+import java.io.InputStream;
+import java.io.IOException;
+import java.io.Reader;
+import java.net.URL;
+import java.util.LinkedList;
+
+public class DGSJJParser {
+
+	protected static enum ElementType {
+		NODE, EDGE, GRAPH, DGS
+	}
+	
+	/**
+	 * Format version.
+	 */
+	protected int version;
+
+	/**
+	 * Name of the graph.
+	 */
+	protected String graphName;
+
+	/**
+	 * Number of step given in the header.
+	 */
+	protected int stepCountAnnounced;
+
+	/**
+	 * Number of events given in the header.
+	 */
+	protected int eventCountAnnounced;
+	
+	/**
+	 * Flag used to indicate if the dgs is using timestamps on event.
+	 */
+	protected boolean isUsingTimeStamp = false;
+	
+	protected ISODateIO timeStampReader;
+	
+	protected TimestampSourceTime timestampSourceTime;
+	
+	protected void setTimestampFormat(String format) throws ParseException {
+		timestampSourceTime = new TimestampSourceTime(graphName == null ? "dgs" : graphName);
+		
+		try {
+			timestampSourceTime.init(format);
+		} catch(TimeException e) {
+			throw new ParseException(e.getMessage());
+		}
+	}
+	
+	protected void setTimestamp(String timestamp)
+		throws ParseException {
+		try {
+			timestampSourceTime.init(timestamp);
+		} catch (TimeException e) {
+			throw new ParseException(e.getMessage());
+		}
+	}
+	
+	protected void checkDGSVersion(String dgsMagic) {
+		version = Integer.parseInt(dgsMagic.replaceAll("[^1-9]", ""));
+		System.out.printf("dgs version is %d\n", version);
+	}
+	
+	public boolean nextEvents() throws IOException {
+		try {
+			next();
+		} catch(ParseException e) {
+			throw new IOException(e);
+		}
+		
+		return false;
+	}
+	
+	public boolean nextStep() throws IOException {
+		return false;
+	}
+}
+PARSER_END(DGSJJParser)
+
+SKIP :
+{
+ 	" "
+|	"\t"
+}
+
+TOKEN: {
+	<#DIGIT				: ["0"-"9"] >
+|	<#LETTER			: ["a"-"z","A"-"Z"] >
+|	<#ALPHA_NUMERIC		: ( <DIGIT> | <LETTER> ) >
+|	<#HASH				: "#" >
+|	<#UNDERSCORE		: "_" >
+|	<#DOT				: "." >
+|	<#QUOTE				: "\"" >
+}
+
+TOKEN: {
+	< NUMBER			: ( <DIGIT> )+ >
+|	< REAL				: ( "-" | "+" )? ( <DIGIT> )+ ( "." (<DIGIT>)+ )? >
+|	< STRING			: (("\"" (~["\""])* "\"")|("'" (~["'"])* "'")) >
+|	< EOL				: ( "\r\n" | "\n" | "\r" ) >
+|	< COMMENT			: <HASH> (~["\n"])* <EOL> >
+}
+
+
+
+TOKEN: {
+	< DGS_MAGIC			: ( "DGS" (<DIGIT>){3} ) >
+}
+
+/*
+ * DGS Directives
+ */
+TOKEN: {
+	< ADD_NODE			: "an" >
+|	< DELETE_NODE		: "dn" >
+|	< CHANGE_NODE		: "cn" >
+|	< ADD_EDGE			: "ae" >
+|	< DELETE_EDGE		: "de" >
+|	< CHANGE_EDGE		: "ce" >
+|	< CHANGE_GRAPH		: "cg" >
+|	< STEP				: "st" >
+}
+
+<IN_TIMESTAMP> TOKEN: {
+	< TIMESTAMP		: ( <ALPHA_NUMERIC> ( <ALPHA_NUMERIC> | ":" | "/" )* | <STRING> ) > : DEFAULT
+}
+
+TOKEN: {
+	< ORIENTATION			: ( "<" | ">" ) >
+}
+
+TOKEN: {
+	< ARRAY_OPEN			: "[" > |
+	< ARRAY_CLOSE			: "]" > |
+	< ARRAY_SEPARATION		: "," > |
+	< ADD					: "+" > |
+	< DELETE				: "-" > |
+	< ASSIGNMENT			: ( ":" | "=" ) > |
+	< IDENTIFIER			: <LETTER> ((<DOT>)?(<ALPHA_NUMERIC>|<UNDERSCORE>))* >
+}
+
+private
+void next():
+{
+}
+{
+	LOOKAHEAD(2)
+	directive()
+|	<COMMENT>
+|	<EOL>
+|	<EOF>
+}
+
+private
+void header():
+{
+	Token t;
+}
+{
+	t = <DGS_MAGIC> { checkDGSVersion(t.image); } 
+	t = <NUMBER> { stepCountAnnounced  = Integer.parseInt(t.image); }
+	t = <NUMBER> { eventCountAnnounced = Integer.parseInt(t.image); }
+	( t = <STRING> { setTimestampFormat(t.image); } )? 
+	( <EOL> | <EOF> )
+}
+
+private
+String unquotedString():
+{
+	Token t;
+}
+{
+	t = <STRING> { return t.image.substring(1,t.image.length()-1); }
+}
+
+private
+String id():
+{
+	Token t;
+	String s;
+}
+{
+	(	
+		t = <IDENTIFIER> { return t.image; }
+	|	s = unquotedString() { return s; }
+	|	t = <NUMBER> { return t.image; }
+	)
+}
+
+private
+String timestamp():
+{
+	Token t = null;
+	String s = null;
+}
+{
+	(
+		t = <TIMESTAMP>
+	|	s = unquotedString()
+	)
+	
+	{
+		return t != null ? t.image : s;
+	}
+}
+
+private
+void attributes(ElementType type, String id):
+{
+}
+{
+	( LOOKAHEAD(2) attribute(type,id) )*
+}
+
+private
+void attribute(ElementType type, String id):
+{
+	boolean add = true;
+	String key;
+	Object value = Boolean.TRUE;
+}
+{
+	(
+		<ADD> { add = true; }
+	|	<DELETE> { add = false; value = null; }
+	)?
+	
+	key = attributeKey() ( <ASSIGNMENT> value = attributeValue() )?
+	{
+		switch(type) {
+		case NODE:
+			if(add) sendNodeAttributeChanged(graphName,id,key,null,value);
+			else sendNodeAttributeRemoved(graphName,id,key);
+			break;
+		case EDGE:
+			if(add) sendEdgeAttributeChanged(graphName,id,key,null,value);
+			else sendEdgeAttributeRemoved(graphName,id,key);
+			break;
+		case GRAPH:
+			if(add) sendGraphAttributeChanged(graphName,key,null,value);
+			else sendGraphAttributeRemoved(graphName,key);
+			break;
+		}
+	}
+}
+
+private
+String attributeKey():
+{
+	String key;
+}
+{
+	key = id() { return key; }
+}
+
+private
+Object attributeValue():
+{
+	Object value;
+}
+{
+	(
+		value = attributeArrayValue()
+	|	value = attributeNumberValue()
+	|	value = attributeStringValue()
+	)
+	
+	{ return value; }
+}
+
+private
+Object attributeArrayValue():
+{
+	LinkedList<Object> array = new LinkedList<Object>();
+	Object value;
+}
+{
+	<ARRAY_OPEN> ( ( value = attributeValue() { array.add(value); } ) ( <ARRAY_SEPARATION> value = attributeValue() { array.add(value); } )* )? <ARRAY_CLOSE>
+	{
+		return array.toArray();
+	}
+}
+
+private
+Object attributeNumberValue():
+{
+	Token t;
+}
+{
+	(
+		t = <NUMBER> { return Integer.parseInt(t.image); }
+	|	t = <REAL> { return Double.parseDouble(t.image); }
+	)
+}
+
+private
+Object attributeStringValue():
+{
+	String s;
+}
+{
+	s = unquotedString() { return s; } 
+}
+
+private
+void directive():
+{
+	String s = null;
+}
+{
+	{ token_source.SwitchTo(IN_TIMESTAMP); }
+	( s = timestamp() { setTimestamp(s); } )?
+	{ 
+		token_source.SwitchTo(DEFAULT);
+	}
+	
+	(
+		addNode()
+	|	deleteNode()
+	|	changeNode()
+	|	addEdge()
+	|	deleteEdge()
+	|	changeEdge()
+	|	changeGraph()
+	|	step()
+	)
+	
+	(
+		<EOL>
+	| 	<EOF>
+	)
+}
+
+private
+void addNode():
+{
+	String id;
+}
+{
+	<ADD_NODE> id = id() { sendNodeAdded(graphName,id); } attributes(ElementType.NODE,id)
+}
+
+private
+void deleteNode():
+{
+	String id;
+}
+{
+	<DELETE_NODE> id = id() { sendNodeRemoved(graphName,id); }
+}
+
+private
+void changeNode():
+{
+	String id;
+}
+{
+	<CHANGE_NODE> id = id() attributes(ElementType.NODE,id)
+}
+
+private
+void addEdge():
+{
+	String id, extr1, extr2;
+	Token orientation = null;
+}
+{
+	<ADD_EDGE> id = id() extr1 = id() 
+	( orientation = <ORIENTATION> )? 
+	extr2 = id()
+	{ 
+		boolean directed = false;
+		
+		if(orientation != null) {
+			if(orientation.image.equals(">"))
+				directed = true;
+			else if(orientation.image.equals("<")) {
+				String t = extr2;
+				directed = true;
+				extr2 = extr1;
+				extr1 = t;
+			}
+		}
+		
+		sendEdgeAdded(graphName,id,extr1,extr2,directed);
+	}
+	attributes(ElementType.EDGE,id)
+}
+
+private
+void deleteEdge():
+{
+	String id;
+}
+{
+	<DELETE_EDGE> id = id() { sendEdgeRemoved(graphName,id); }
+}
+
+private
+void changeEdge():
+{
+	String id;
+}
+{
+	<CHANGE_EDGE> id = id() attributes(ElementType.EDGE,id)
+}
+
+private
+void changeGraph():
+{
+}
+{
+	<CHANGE_GRAPH> attributes(ElementType.GRAPH,null)
+}
+
+private
+void step():
+{
+	Token t;
+}
+{
+	<STEP> t = <REAL> { sendStepBegins(graphName,Double.parseDouble(t.image)); } 
+}
